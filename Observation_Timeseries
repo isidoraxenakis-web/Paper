@@ -1,0 +1,418 @@
+
+from pyproj import Geod
+from shapely.geometry import LineString, Point, Polygon
+import numpy as np
+import xarray as xr
+from datetime import timedelta
+import datetime as dt
+import matplotlib.pyplot as plt
+from netCDF4 import Dataset
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import matplotlib.cm
+import pandas as pd
+from glob import glob
+import xesmf as xe
+import matplotlib as mpl
+from matplotlib import gridspec
+import cartopy.io.shapereader as shpreader
+from cartopy.feature import ShapelyFeature
+import glob
+
+
+#Heatwaves
+
+#Calculating Heatwaves
+
+#Open netCDF files of maximum and minimum temperature in 2010
+Tmax_Data = xr.open_mfdataset("/nfs/a68/htmq9847/Tmax/*.nc")
+Tmin_Data = xr.open_mfdataset("/nfs/a68/htmq9847/Tmin/*.nc")
+
+#Read in variables of minimum and maximum temperature, latitude, longitude and time
+maxtemp = Tmax_Data['t2m'][:]
+mintemp = Tmin_Data['t2m'][:]
+lat = Tmax_Data['latitude'][:]
+lon = Tmax_Data['longitude'][:]
+time = Tmax_Data['valid_time'][:]
+
+#Convert temperature variables to celcious
+maxtemp = maxtemp - 273.15
+mintemp = mintemp - 273.15
+
+#Northern Hemisphere
+#Index with temperature variables according to summer season
+Nsummer_maxtemp = maxtemp.sel(valid_time = (Tmax_Data.valid_time.dt.season == 'JJA'))
+Nsummer_mintemp = mintemp.sel(valid_time = (Tmin_Data.valid_time.dt.season == 'JJA'))
+
+#Calculate maximum and minimum temperature across a 9-day moving window mean
+Nnineday_maxtemp = Nsummer_maxtemp.rolling(valid_time = 9, center = True).mean()     
+Nnineday_mintemp = Nsummer_mintemp.rolling(valid_time = 9, center = True).mean()     
+
+#Calculate the 90th percentile of the maximum and minimum 9-day moving window mean temperature
+NPercentile_Tmax = Nnineday_maxtemp.quantile(0.9, dim = 'valid_time')
+NPercentile_Tmin = Nnineday_mintemp.quantile(0.9, dim = 'valid_time')
+
+#Define the temperature function of heatwaves where the summer max and min temperatures are larger than their 90th percentiles.
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+Ntemp_function = Nsummer_maxtemp.where(((Nsummer_maxtemp > NPercentile_Tmax) & (Nsummer_mintemp > NPercentile_Tmin)), 0)
+
+Ntemp_function = Ntemp_function.where((Ntemp_function == 0.0), 1)
+#Define a minimum observation window summation of 3 days for temperature function 
+Nmin_observation_window = (Ntemp_function.rolling(valid_time = 3, center = True).sum())
+
+#Define heatwaves where the summ of observations is larger than 3
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+Nheatwave = Nmin_observation_window.where((Nmin_observation_window == 3), 0)
+
+#Select only the values that are 
+NHeatwave = Nheatwave.where((Nheatwave < 3), 1)
+
+#Southern Hemisphere
+#Index with temperature variables according to summer season
+Ssummer_maxtemp = maxtemp.sel(valid_time = (Tmax_Data.valid_time.dt.season == 'DJF'))
+Ssummer_mintemp = mintemp.sel(valid_time = (Tmin_Data.valid_time.dt.season == 'DJF'))
+
+#Calculate maximum and minimum temperature across a 9-day moving window mean
+Snineday_maxtemp = Ssummer_maxtemp.rolling(valid_time = 9, center = True).mean()     
+Snineday_mintemp = Ssummer_mintemp.rolling(valid_time = 9, center = True).mean()     
+
+#Calculate the 90th percentile of the maximum and minimum 9-day moving window mean temperature
+SPercentile_Tmax = Snineday_maxtemp.quantile(0.9, dim = 'valid_time')
+SPercentile_Tmin = Snineday_mintemp.quantile(0.9, dim = 'valid_time')
+
+#Define the temperature function of heatwaves where the summer max and min temperatures are larger than their 90th percentiles.
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+Stemp_function = Ssummer_maxtemp.where(((Ssummer_maxtemp > SPercentile_Tmax) & (Ssummer_mintemp > SPercentile_Tmin)), 0)
+
+Stemp_function = Stemp_function.where((Stemp_function == 0.0), 1)
+#Define a minimum observation window summation of 3 days for temperature function 
+Smin_observation_window = (Stemp_function.rolling(valid_time = 3, center = True).sum())
+
+#Define heatwaves where the summ of observations is larger than 3
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+Sheatwave = Smin_observation_window.where((Smin_observation_window == 3), 0)
+
+#Select only the values that are 
+SHeatwave = Sheatwave.where((Sheatwave < 3), 1)
+
+
+#Rename valid time to time
+NHeatwave = NHeatwave.rename({"valid_time": "time"})
+SHeatwave = SHeatwave.rename({"valid_time":"time"})
+
+#Resample and sum Yearly
+NHeatwave = NHeatwave.resample(time = "YS").sum()
+SHeatwave = SHeatwave.resample(time = "YS").sum()
+
+#Compute
+NHeatwave = NHeatwave.compute()
+SHeatwave = SHeatwave.compute()
+
+#Application of GFED mask
+GFED_mask = xr.open_dataset("/nfs/a68/htmq9847/mask/GFED_basis_regions.nc")['GFED_basis_regions'][:]
+
+#Regrid GFED mask
+output_grid_GFED = xr.Dataset({"latitude": (["latitude"], NHeatwave.latitude.values),
+
+                       "longitude": (["longitude"], NHeatwave.longitude.values)})
+    
+regridder_GFED = xe.Regridder(GFED_mask, output_grid_GFED, "bilinear")
+
+output_grid_GFED_Mask = regridder_GFED(GFED_mask)
+
+
+#Calculate for regions
+
+#Northern Hemisphere
+Heatwaves_BONA_GFED  = NHeatwave.where(output_grid_GFED_Mask == 1)
+Heatwaves_TENA_GFED  = NHeatwave.where(output_grid_GFED_Mask == 2)
+Heatwaves_CEAM_GFED  = NHeatwave.where(output_grid_GFED_Mask == 3)
+Heatwaves_NHSA_GFED  = NHeatwave.where(output_grid_GFED_Mask == 4)
+Heatwaves_BOAS_GFED  = NHeatwave.where(output_grid_GFED_Mask == 10)
+Heatwaves_EURO_GFED  = NHeatwave.where(output_grid_GFED_Mask == 6)
+Heatwaves_MIDE_GFED  = NHeatwave.where(output_grid_GFED_Mask == 7)
+Heatwaves_NHAF_GFED  = NHeatwave.where(output_grid_GFED_Mask == 8)
+Heatwaves_CEAS_GFED  = NHeatwave.where(output_grid_GFED_Mask == 11)
+
+#Southern Hemisphere
+Heatwaves_SHAF_GFED  = SHeatwave.where(output_grid_GFED_Mask == 9)
+Heatwaves_SHSA_GFED  = SHeatwave.where(output_grid_GFED_Mask == 5)
+Heatwaves_SEAS_GFED  = SHeatwave.where(output_grid_GFED_Mask == 12)
+Heatwaves_EQAS_GFED  = SHeatwave.where(output_grid_GFED_Mask == 13)
+Heatwaves_AUST_GFED  = SHeatwave.where(output_grid_GFED_Mask == 14)
+Heatwaves_SHSA_GFED  = SHeatwave.where(output_grid_GFED_Mask == 5)
+
+#Averaging
+#Northern Hemisphere
+Heatwaves_BONA_mean  = Heatwaves_BONA_GFED.sum(["latitude","longitude"])
+Heatwaves_TENA_mean  = Heatwaves_TENA_GFED.sum(["latitude","longitude"])
+Heatwaves_CEAM_mean  = Heatwaves_CEAM_GFED.sum(["latitude","longitude"])
+Heatwaves_NHSA_mean = Heatwaves_NHSA_GFED.sum(["latitude","longitude"])
+Heatwaves_BOAS_mean  = Heatwaves_BOAS_GFED.sum(["latitude","longitude"])
+Heatwaves_EURO_mean  = Heatwaves_EURO_GFED.sum(["latitude","longitude"])
+Heatwaves_MIDE_mean  = Heatwaves_MIDE_GFED.sum(["latitude","longitude"])
+Heatwaves_NHAF_mean  = Heatwaves_NHAF_GFED.sum(["latitude","longitude"])
+Heatwaves_CEAS_mean  = Heatwaves_CEAS_GFED.sum(["latitude","longitude"])
+
+#Souhern Hemisphere
+#Southern Hemisphere
+Heatwaves_SHAF_mean  = Heatwaves_SHAF_GFED.sum(["latitude","longitude"])
+Heatwaves_SHSA_mean  = Heatwaves_SHSA_GFED.sum(["latitude","longitude"])
+Heatwaves_SEAS_mean = Heatwaves_SEAS_GFED.sum(["latitude","longitude"])
+Heatwaves_EQAS_mean = Heatwaves_EQAS_GFED.sum(["latitude","longitude"])
+Heatwaves_AUST_mean  = Heatwaves_AUST_GFED.sum(["latitude","longitude"])
+Heatwaves_SHSA_mean  = Heatwaves_SHSA_GFED.sum(["latitude","longitude"])
+
+
+#Droughts
+
+#Calculation of Droughts
+
+#Open netCDF files of daily soil mosture
+Input_SM_mean = xr.open_mfdataset("/nfs/a68/htmq9847/SM_mean/*.nc")['swvl1'][:]
+
+#Read in variables of soil moisture (Volumetric soil water layer), latitude, longitude and time
+ilat = Input_SM_mean['latitude'][:]
+ilon = Input_SM_mean['longitude'][:]
+itime = Input_SM_mean['valid_time'][:]
+
+#Open netCDF files of daily soil mosture
+Output_SM_mean = xr.open_dataset("/nfs/a68/lec1stt/Isidora_data/Daily_mean_Met_and_soil_moisture_variables_for_HistSST_INFERNO_UKESM1_2000_2014.nc")['moisture_content_of_soil_layer'][:]
+
+#Read in variables of soil moisture (Volumetric soil water layer), latitude, longitude and time
+olat = Output_SM_mean['latitude'][:]
+olon = Output_SM_mean['longitude'][:]
+otime = Output_SM_mean['time'][:]
+
+#Selecting all of the soil moisture values of the time frame
+sm = Input_SM_mean.sel(valid_time = ((Input_SM_mean.valid_time.dt.day >= 1) & (Input_SM_mean.valid_time.dt.day <= 5114)))
+
+#Calculating soil moisture across a 30-day moving window mean
+thirtyday_sm = sm.rolling(valid_time = 30, center = True).mean()
+
+#Calculate the 80th percentile of the soil moisture 9-day moving window 
+Percentile_sm = thirtyday_sm.quantile(0.8, dim = 'valid_time')
+
+#Calculate where the data soil moisture is less than the 80th Percentile
+sm_function = sm.where((sm < Percentile_sm))
+
+#Fill nan values with 0
+sm1 = sm_function.fillna(0)
+
+#Replace Soil moisture drought values with 1 
+sm2 = sm1.where((sm1 == 0.0), 1)
+
+#Calculate the difference between each successive drought soil moisture value
+diff = sm2.diff(dim='valid_time', n = 1)
+
+#Where drought event starts the difference is 1 (transition from 0 to 1) 
+drought_starts = diff.where(diff == 1)
+
+#Renaming
+drought_starts = drought_starts.rename({"valid_time":"time"})
+
+#Resample
+drought_starts = drought_starts.resample(time = "YS").sum()
+
+#Compute
+drought_starts = drought_starts.compute()
+
+
+time_years = drought_starts["time"]
+
+#Calculate for regions
+
+#Northern Hemisphere
+Drought_BONA_GFED  = drought_starts.where(output_grid_GFED_Mask == 1)
+Drought_TENA_GFED  = drought_starts.where(output_grid_GFED_Mask == 2)
+Drought_CEAM_GFED  = drought_starts.where(output_grid_GFED_Mask == 3)
+Drought_NHSA_GFED  = drought_starts.where(output_grid_GFED_Mask == 4)
+Drought_BOAS_GFED  = drought_starts.where(output_grid_GFED_Mask == 10)
+Drought_EURO_GFED  = drought_starts.where(output_grid_GFED_Mask == 6)
+Drought_MIDE_GFED  = drought_starts.where(output_grid_GFED_Mask == 7)
+Drought_NHAF_GFED  = drought_starts.where(output_grid_GFED_Mask == 8)
+Drought_CEAS_GFED  = drought_starts.where(output_grid_GFED_Mask == 11)
+
+#Southern Hemisphere
+Drought_SHAF_GFED  = drought_starts.where(output_grid_GFED_Mask == 9)
+Drought_SHSA_GFED  = drought_starts.where(output_grid_GFED_Mask == 5)
+Drought_SEAS_GFED  = drought_starts.where(output_grid_GFED_Mask == 12)
+Drought_EQAS_GFED  = drought_starts.where(output_grid_GFED_Mask == 13)
+Drought_AUST_GFED  = drought_starts.where(output_grid_GFED_Mask == 14)
+Drought_SHSA_GFED  = drought_starts.where(output_grid_GFED_Mask == 5)
+
+#Summing
+#Northern Hemisphere
+Drought_BONA = Drought_BONA_GFED.sum(["latitude","longitude"])
+Drought_TENA = Drought_TENA_GFED.sum(["latitude","longitude"])
+Drought_CEAM  = Drought_CEAM_GFED.sum(["latitude","longitude"])
+Drought_NHSA = Drought_NHSA_GFED.sum(["latitude","longitude"])
+Drought_BOAS = Drought_BOAS_GFED.sum(["latitude","longitude"])
+Drought_EURO  = Drought_EURO_GFED.sum(["latitude","longitude"])
+Drought_MIDE  = Drought_MIDE_GFED.sum(["latitude","longitude"])
+Drought_NHAF = Drought_NHAF_GFED.sum(["latitude","longitude"])
+Drought_CEAS = Drought_CEAS_GFED.sum(["latitude","longitude"])
+
+#Souhern Hemisphere
+#Southern Hemisphere
+Drought_SHAF  = Drought_SHAF_GFED.sum(["latitude","longitude"])
+Drought_SHSA = Drought_SHSA_GFED.sum(["latitude","longitude"])
+Drought_SEAS  = Drought_SEAS_GFED.sum(["latitude","longitude"])
+Drought_EQAS = Drought_EQAS_GFED.sum(["latitude","longitude"])
+Drought_AUST  = Drought_AUST_GFED.sum(["latitude","longitude"])
+Drought_SHSA  = Drought_SHSA_GFED.sum(["latitude","longitude"])
+
+
+#Calculation of GFED Fires
+
+#Sort GFED fIles
+GFED_BA_files = sorted(glob.glob('/nfs/a68/htmq9847/BAF/BA20*.nc'))
+ 
+#Open GFED files for 2000-2014 time period
+GFED_BA= xr.open_mfdataset(GFED_BA_files).sel(time=slice('2000-01-01T00:00:00.000000000','2014-12-31T00:00:00.000000000'))
+ 
+#Read total burnt area fraction in 
+ts_BA1 = GFED_BA['Total']
+
+#Resumple to a yearly sum
+ts_BA1_resample = ts_BA1.resample(time = "YS").sum()
+
+#Renaming
+ts_BA1_resample = ts_BA1_resample.rename({"lat": "latitude"})
+ts_BA1_resample = ts_BA1_resample.rename({"lon": "longitude"})
+
+ts_BA1_resample = ts_BA1_resample.compute()
+
+#Reading Anual Inferno Output
+Annual_output_dataset_Fires = xr.open_dataset("/nfs/a68/htmq9847/Inferno_data/Annual_mean_burnt_area_fraction_for_HistSST_INFERNO_UKESM1_2000_2014_fract_area.nc")['annual_mean_burnt_area_fraction'][:]
+
+Inferno_BAF = xr.open_dataset("/nfs/a68/htmq9847/Inferno_data/Annual_mean_burnt_area_fraction_for_HistSST_INFERNO_UKESM1_2000_2014_fract_area.nc")
+lat = Inferno_BAF['latitude'][:]
+lon = Inferno_BAF['longitude'][:]
+time = Inferno_BAF['time'][:]
+
+#Application of GFED mask
+GFED_mask = xr.open_dataset("/nfs/a68/htmq9847/mask/GFED_basis_regions.nc")['GFED_basis_regions'][:]
+
+#Regrid GFED mask
+output_grid_Fire_GFED = xr.Dataset({"latitude": (["latitude"], ts_BA1_resample.latitude.values),
+
+                       "longitude": (["longitude"], ts_BA1_resample.longitude.values)})
+    
+regridder_Fire_GFED = xe.Regridder(GFED_mask, output_grid_Fire_GFED, "bilinear")
+
+output_grid_Fires_GFED = regridder_Fire_GFED(GFED_mask)
+
+#Calculate for regions
+
+#Northern Hemisphere
+Fire_BONA_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 1)
+Fire_TENA_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 2)
+Fire_CEAM_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 3)
+Fire_NHSA_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 4)
+Fire_BOAS_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 10)
+Fire_EURO_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 6)
+Fire_MIDE_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 7)
+Fire_NHAF_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 8)
+Fire_CEAS_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 11)
+
+#Southern Hemisphere
+Fire_SHAF_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 9)
+Fire_SHSA_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 5)
+Fire_SEAS_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 12)
+Fire_EQAS_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 13)
+Fire_AUST_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 14)
+Fire_SHSA_GFED  = ts_BA1_resample.where(output_grid_Fires_GFED == 5)
+
+#Summing
+#Northern Hemisphere
+Fire_BONA = Fire_BONA_GFED.sum(["latitude","longitude"])
+Fire_TENA = Fire_TENA_GFED.sum(["latitude","longitude"])
+Fire_CEAM  = Fire_CEAM_GFED.sum(["latitude","longitude"])
+Fire_NHSA = Fire_NHSA_GFED.sum(["latitude","longitude"])
+Fire_BOAS = Fire_BOAS_GFED.sum(["latitude","longitude"])
+Fire_EURO  = Fire_EURO_GFED.sum(["latitude","longitude"])
+Fire_MIDE  = Fire_MIDE_GFED.sum(["latitude","longitude"])
+Fire_NHAF = Fire_NHAF_GFED.sum(["latitude","longitude"])
+Fire_CEAS = Fire_CEAS_GFED.sum(["latitude","longitude"])
+
+#Souhern Hemisphere
+#Southern Hemisphere
+Fire_SHAF  = Fire_SHAF_GFED.sum(["latitude","longitude"])
+Fire_SHSA = Fire_SHSA_GFED.sum(["latitude","longitude"])
+Fire_SEAS  = Fire_SEAS_GFED.sum(["latitude","longitude"])
+Fire_EQAS = Fire_EQAS_GFED.sum(["latitude","longitude"])
+Fire_AUST  = Fire_AUST_GFED.sum(["latitude","longitude"])
+Fire_SHSA  = Fire_SHSA_GFED.sum(["latitude","longitude"])
+
+years = [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014]
+
+
+import matplotlib.pyplot as plt
+
+fig, axs = plt.subplots(4, 4, figsize=(18, 12))
+
+regions = [
+    ('BONA', Heatwaves_BONA_mean, Drought_BONA, Fire_BONA),
+    ('TENA', Heatwaves_TENA_mean, Drought_TENA, Fire_TENA),
+    ('CEAM', Heatwaves_CEAM_mean, Drought_CEAM, Fire_CEAM),
+    ('NHSA', Heatwaves_NHSA_mean, Drought_NHSA, Fire_NHSA),
+    ('SHSA', Heatwaves_SHSA_mean, Drought_SHSA, Fire_SHAF),
+    ('EURO', Heatwaves_EURO_mean, Drought_EURO, Fire_EURO),
+    ('MIDE', Heatwaves_MIDE_mean, Drought_MIDE, Fire_MIDE),
+    ('NHAF', Heatwaves_NHAF_mean, Drought_NHAF, Fire_NHAF),
+    ('SHAF', Heatwaves_SHAF_mean, Drought_SHAF, Fire_SHAF),
+    ('BOAS', Heatwaves_BOAS_mean, Drought_BOAS, Fire_BOAS),
+    ('CEAS', Heatwaves_CEAS_mean, Drought_CEAS, Fire_CEAS),
+    ('SEAS', Heatwaves_SEAS_mean, Drought_SEAS, Fire_SEAS),
+    ('AUST', Heatwaves_AUST_mean, Drought_AUST, Fire_AUST)
+]
+
+for i, (region, hw, dr, fire) in enumerate(regions):
+    row, col = divmod(i, 4)
+    ax1 = axs[row, col]
+
+    # ---- 1st y-axis: Heatwaves ----
+    ax1.plot(years, hw, color='red', label='Heatwaves')
+    ax1.set_ylabel('Heatwaves', color='red')
+    ax1.tick_params(axis='y', labelcolor='red')
+    ax1.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+
+    # ---- 2nd y-axis: Droughts ----
+    ax2 = ax1.twinx()
+    ax2.plot(years, dr, color='blue', label='Droughts')
+    ax2.set_ylabel('Droughts', color='blue')
+    ax2.tick_params(axis='y', labelcolor='blue')
+    ax2.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+
+
+
+    # Bars for Fires on the primary axis 
+    bars = ax1.bar(years, fire, alpha=0.3, color='grey', width=0.5, label='Fires')
+
+    # Add fire value labels above each bar
+    #ax1.bar_label(bars, labels=[f'{v:.0f}' for v in fire], padding=2, color='black', fontsize= 7)
+
+
+    # ---- 3rd y-axis: Fires ----
+    #ax3 = ax1.twinx()
+    #ax3.bar(years, fire, alpha=0.3, color='grey', label='Fires', width=0.5)
+    #ax3.set_ylabel('Fires', color='grey')
+    #ax3.tick_params(axis='y', labelcolor='grey')
+    #ax3.ticklabel_format(style='sci', axis='y', scilimits=(10,2))
+
+    # Offset the third axis so it doesn’t overlap with drought’s axis
+    #ax3.spines["right"].set_position(("outward", 20))
+
+    # ---- Title & labels ----
+    ax1.set_title(region)
+    ax1.set_xlabel('Years')
+
+# Adjust layout
+plt.subplots_adjust(left=0.1, right=0.9, top=0.95, bottom=0.05, wspace=0.4, hspace=0.4)
+
+# Hide any unused subplots
+for i in range(len(regions), 16):
+    fig.delaxes(axs.flatten()[i])
+
+plt.show()
