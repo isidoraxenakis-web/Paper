@@ -1,0 +1,140 @@
+from pyproj import Geod
+from shapely.geometry import LineString, Point, Polygon
+import numpy as np
+import xarray as xr
+from datetime import timedelta
+import datetime as dt
+import matplotlib.pyplot as plt
+from netCDF4 import Dataset
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import matplotlib.cm
+import pandas as pd
+from glob import glob
+import xesmf as xe
+import matplotlib as mpl
+from matplotlib import gridspec
+import cartopy.io.shapereader as shpreader
+from cartopy.feature import ShapelyFeature
+import glob
+
+#Open netCDF files of daily soil mosture
+Input_SM_mean = xr.open_mfdataset("/nfs/a68/htmq9847/SM_mean/*.nc")['swvl1'][:]
+
+#Read in variables of soil moisture (Volumetric soil water layer), latitude, longitude and time
+lat = Input_SM_mean['latitude'][:]
+lon = Input_SM_mean['longitude'][:]
+time = Input_SM_mean['valid_time'][:]
+
+
+#Open netCDF files of daily soil mosture
+Output_SM_mean = xr.open_dataset("/nfs/a68/lec1stt/Isidora_data/Daily_mean_Met_and_soil_moisture_variables_for_HistSST_INFERNO_UKESM1_2000_2014.nc")['moisture_content_of_soil_layer'][:]
+
+#Read in variables of soil moisture (Volumetric soil water layer), latitude, longitude and time
+lat = Output_SM_mean['latitude'][:]
+lon = Output_SM_mean['longitude'][:]
+time = Output_SM_mean['time'][:]
+
+
+#create output grid to regrid input data to INFERNO output
+
+#For maximum temperature
+output_grid_SM = xr.Dataset({"latitude": (["latitude"], Output_SM_mean.latitude.values),
+
+                       "longitude": (["longitude"], Output_SM_mean.longitude.values)})
+
+regridder_SM = xe.Regridder(Input_SM_mean, output_grid_SM, "bilinear")
+
+output_grid_SM = regridder_SM(Input_SM_mean)
+
+
+
+#Selecting all of the soil moisture values of the time frame
+sm = output_grid_SM.sel(valid_time = ((output_grid_SM.valid_time.dt.day >= 1) & (output_grid_SM.valid_time.dt.day <= 5114)))
+
+#Calculating soil moisture across a 30-day moving window mean
+thirtyday_sm = sm.rolling(valid_time = 30, center = True).mean()
+
+#Calculate the 80th percentile of the soil moisture 9-day moving window 
+Percentile_sm = thirtyday_sm.quantile(0.8, dim = 'valid_time')
+
+#Calculate where the data soil moisture is less than the 80th Percentile
+sm_function = sm.where((sm < Percentile_sm))
+
+#Fill nan values with 0
+sm1 = sm_function.fillna(0)
+
+#Replace Soil moisture drought values with 1 
+sm2 = sm1.where((sm1 == 0.0), 1)
+
+#Calculate the difference between each successive drought soil moisture value
+diff = sm2.diff(dim='valid_time', n = 1)
+
+#Where drought event starts the difference is 1 (transition from 0 to 1) 
+drought_starts = diff.where(diff == 1)
+drought_ends = diff.where(diff == -1) #Similarly when drought ends the difference is -1 (transition from 1 to 0)
+
+#count the amount of times a drought event start
+drought_starts_number = drought_starts.count(dim = 'valid_time')
+
+
+#Application of GFED mask
+GFED_mask = xr.open_dataset("/nfs/a68/htmq9847/mask/GFED_basis_regions.nc")['GFED_basis_regions'][:]
+
+#Application of GFED mask
+GFED_mask = xr.open_dataset("/nfs/a68/htmq9847/mask/GFED_basis_regions.nc")['GFED_basis_regions'][:]
+
+output_grid_Drought_GFED = xr.Dataset({"latitude": (["latitude"], Output_SM_mean.latitude.values),
+
+                       "longitude": (["longitude"], Output_SM_mean.longitude.values)})
+    
+regridder_Drought_GFED = xe.Regridder(GFED_mask, output_grid_Drought_GFED, "bilinear")
+
+output_grid_Drought_GFED = regridder_Drought_GFED(GFED_mask)
+
+Drought_landonly_GFED = drought_starts_number.where((output_grid_Drought_GFED >0) & (output_grid_Drought_GFED < 15))
+
+
+Drought_landonly_GFED = Drought_landonly_GFED.compute()
+
+# Initiate new Figure 
+fig= plt.figure(figsize=(10, 7))
+
+gs = gridspec.GridSpec(1, 1)
+
+index=0
+
+# Initiate new axes 
+ax = fig.add_subplot(gs[0], projection=ccrs.PlateCarree())
+
+#Style of axes
+crs = ccrs.Robinson(central_longitude = 0)
+
+# Add coastlines
+ax.coastlines()
+
+
+#Add gridlines
+#gl = ax.gridlines(draw_labels = True, linestyle='--')
+
+# Adjust font sizes
+#gl.xlabel_style = {'size': 12}   # Longitude labels
+#gl.ylabel_style = {'size': 12}   # Latitude labals
+#gl.right_labels = False
+#gl.top_labels = False
+
+#ax.axis("off")
+ax.add_feature(cfeature.LAND,  edgecolor='black', facecolor='None', alpha=0.5)
+
+cmap = plt.cm.get_cmap("inferno_r").copy()
+cmap.set_under("white")
+
+#Plot square meters of fire for each grid cell
+im = Drought_landonly_GFED.plot.pcolormesh(levels = [50, 100, 200, 300, 400, 600, 800, 1000], cmap = cmap, add_colorbar=False, add_labels=False)
+
+#Add colourbar
+ax_pos = ax.get_position()
+cax = fig.add_axes([ax_pos.x0, 0.1, ax_pos.width, 0.03])
+cbar = plt.colorbar(im, cax=cax, orientation='horizontal', extend = "both")
+cbar.ax.tick_params(labelsize= 15) 
+
