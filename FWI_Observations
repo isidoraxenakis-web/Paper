@@ -1,0 +1,332 @@
+# test obs file
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib import gridspec
+from matplotlib.colors import Normalize, ListedColormap
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import xarray as xr 
+import geopandas as gpd 
+from matplotlib.offsetbox import AnchoredText
+from pyproj import Geod
+from shapely.geometry import LineString, Point, Polygon
+import rioxarray as rio
+from pyproj import Geod
+from shapely.geometry import LineString, Point, Polygon
+import pandas as pd
+import datetime
+from datetime import timedelta
+import os
+import salem
+import glob as glob
+
+
+# Brian Blaylock
+# 7 December 2015
+
+# Various Wind Calculations
+#   Change wind speed and direction to U and V components
+#   Change U and V components to direction
+#   Change U and V components to speed
+#   Calculate the angle between two vecors [u1,v1] and [u2,v2]
+
+import numpy as np
+
+def wind_spddir_to_uv(wspd,wdir):
+    """
+    calculated the u and v wind components from wind speed and direction
+    Input:
+        wspd: wind speed
+        wdir: wind direction
+    Output:
+        u: u wind component
+        v: v wind component
+    """    
+    
+    rad = 4.0*np.arctan(1)/180.
+    u = -wspd*np.sin(rad*wdir)
+    v = -wspd*np.cos(rad*wdir)
+
+    return u,v
+
+def wind_uv_to_dir(U,V):
+    """
+    Calculates the wind direction from the u and v component of wind.
+    Takes into account the wind direction coordinates is different than the 
+    trig unit circle coordinate. If the wind directin is 360 then returns zero
+    (by %360)
+    Inputs:
+      U = west/east direction (wind from the west is positive, from the east is negative)
+      V = south/noth direction (wind from the south is positive, from the north is negative)
+    """
+    WDIR= (270-np.rad2deg(np.arctan2(V,U)))%360
+    return WDIR
+    
+def wind_uv_to_spd(U,V):
+    """
+    Calculates the wind speed from the u and v wind components
+    Inputs:
+      U = west/east direction (wind from the west is positive, from the east is negative)
+      V = south/noth direction (wind from the south is positive, from the north is negative)
+    """
+    WSPD = np.sqrt(np.square(U)+np.square(V))
+    return WSPD
+    
+    
+# Below is used for calculing the angle between two wind vectors   
+def unit_vector(vector):
+    """ Returns the unit vector of the vector.  """
+    return vector / np.linalg.norm(vector)
+
+def angle_between(v1, v2):
+    """
+    Calcualates the angle between two wind vecotrs. Utilizes the cos equation:
+                cos(theta) = (u dot v)/(magnitude(u) dot magnitude(v))
+                
+    Input:
+        v1 = vector 1. A numpy array, list, or tuple with 
+             u in the first index and v in the second --> vector1 = [u1,v1]
+        v2 = vector 2. A numpy array, list, or tuple with 
+             u in the first index and v in the second --> vector2 = [u2,v2]
+    Output:     
+    Returns the angle in radians between vectors 'v1' and 'v2'::
+            >>> angle_between((1, 0, 0), (0, 1, 0))
+            1.5707963267948966
+            >>> angle_between((1, 0, 0), (1, 0, 0))
+            0.0
+            >>> angle_between((1, 0, 0), (-1, 0, 0))
+            3.141592653589793
+    """
+    v1_u = unit_vector(v1)
+    v2_u = unit_vector(v2)
+    angle = np.arccos(np.dot(v1_u, v2_u))
+    if np.isnan(angle):
+        if (v1_u == v2_u).all():
+            return np.rad2deg(0.0)
+        else:
+            return np.rad2deg(np.pi)
+    return np.rad2deg(angle)
+    
+    
+    
+#--- Example -----------------------------------------------------------------#
+if __name__ == "__main__":
+    u = np.array([1,5,-9])
+    v = np.array([-1,-2,5])
+    
+    vector1 = [u[0],v[0]]
+    vector2 = [u[1],v[1]]
+    vector3 = [u[2],v[2]]
+    
+    print( "U component: ", u)
+    print( "V component: ", v)
+    print( "Wind Directions: ", wind_uv_to_dir(u,v))
+    print( "Wind Speeds: ", wind_uv_to_spd(u,v))
+    print( "")
+    print( "Angle between vector 1 and 2: ", angle_between(vector1,vector2))
+    print( "Angle between vector 2 and 3: ", angle_between(vector2,vector3))
+
+
+    #read in files with accumulated hourly precipitation
+tp_files=sorted(glob.glob('/nfs/a68/htmq9847/tp_files_new/*.nc'))
+# read in files with hourly mean u10, v10, d2m and t2m 
+vars_files=sorted(glob.glob('/nfs/a68/htmq9847/vars_files_new/*.nc'))
+
+vars_ = xr.open_mfdataset(
+    vars_files, concat_dim="valid_time", combine='nested', chunks={"longitude": "auto", "latitude": "auto"}
+)  
+
+tp = xr.open_mfdataset(
+    tp_files, concat_dim="valid_time", combine='nested', chunks={"longitude": "auto", "latitude": "auto"}
+)  
+
+#now sort files that have been read in by their time dimension so they are in order
+tp = tp.sortby('valid_time')
+#print(tp)
+vars_ = vars_.sortby('valid_time')
+#print(vars_)
+
+#I am adding 6 hours to the file time because Indonesia is 6 hours ahead of UTC time but you can edit/remove this 
+tp['valid_time'] = tp.valid_time.values+pd.Timedelta(hours=1)
+vars_['valid_time'] = vars_.valid_time.values+pd.Timedelta(hours=1)
+
+#drop any duplicate times from xarray 
+tp=tp.drop_duplicates(dim="valid_time")
+vars_=vars_.drop_duplicates(dim="valid_time")
+
+print(tp)
+print(vars_)
+
+
+# #for all vars except precip select mid-day
+loc_midday,=np.where(vars_.valid_time.dt.hour == 13)
+vars_ = vars_.isel(valid_time=loc_midday)
+
+# #I clip the file to Indonesia but you won't need to do this
+# input_vars_ = clip_array(vars_,IDN_shp)#ck_shp)
+input_vars_=vars_
+print(input_vars_)
+
+# #for precip select mid-day on start day then create 24 hour averages from 12-12 each day
+
+#my files start at 06:00 am local time because of the time difference but yours will be 00 UTC so you'll need to do:
+# valid_time=np.arange(12,len(tp.valid_time.values[:-12]).resample(valid_time='24H').sum() 
+#to get the right time periods
+input_tp = tp.isel(valid_time=np.arange(6,len(tp.valid_time.values[:-18]))).resample(valid_time='24H').sum()
+# again clipping file to Indonesia but you won't need to do this so I commented it out
+# input_tp = clip_array(input_tp,IDN_shp)#ck_shp)
+print(input_tp,input_vars_)
+
+#add total precip to input_vars_ dataset 
+input_vars_['tp']=input_tp['tp']
+
+
+#create variables needed (RH from d2m and t2m, winddir and windspeed from u10 and v10 and convert units of total precip (tp))
+
+term1 = np.exp(((17.625*(input_vars_['d2m']-273.15))/(243.04+(input_vars_['d2m'].values-273.15))))
+term2 = np.exp((17.625*(input_vars_['t2m']-273.15))/(243.04+(input_vars_['t2m'].values-273.15)))
+print(np.shape(term1),np.shape(term2))
+
+input_vars_['rh'] = 100*(term1/term2)
+print(input_vars_)
+
+input_vars_['winddir'] = wind_uv_to_dir((input_vars_['u10']*3600/1e3),(input_vars_['v10']*3600/1e3))
+
+input_vars_['windspeed'] = wind_uv_to_spd((input_vars_['u10']*3600/1e3),(input_vars_['v10']*3600/1e3))
+
+input_vars_['t2m'] = (input_vars_['t2m']-273.15)
+
+#convert rain from m/hr to mm/hr
+input_vars_['tp'] = input_vars_['tp']*1e3
+
+#now rename variables in xarray dataset so they are named as the FWI code expects them to be
+input_vars_ = input_vars_.rename({'rh':'hurs','t2m':'tas','tp':'pr','windspeed':'sfcWind'})
+input_vars_ = input_vars_.drop_vars(["u10","v10","d2m"])
+input_vars_ = input_vars_.rename({'valid_time':'time'})
+input_vars_ = input_vars_.rename({'latitude':'lat','longitude':'lon'})
+
+# the code needs snow depth too (you may have downloaded this)
+# I am setting snow depth to 0 m as there is no snow in Indonesia
+input_vars_['snd']=input_vars_['hurs'].copy()
+input_vars_['snd'][:,:,:]=0.0
+input_vars_['snd']=input_vars_['snd'].assign_attrs(
+    units="m", description="snow depth at 12:00 LT"
+)
+#now im adding descriptions and units to the xarray variables as the FWI uses this
+input_vars_
+input_vars_['hurs']=input_vars_['hurs'].assign_attrs(
+    units="%", description="Relative Humidity at 12:00 LT"
+)
+input_vars_['tas']=input_vars_['tas'].assign_attrs(
+    units="degC", description="surface temperature at 12:00 LT"
+)
+input_vars_['pr']=input_vars_['pr'].assign_attrs(
+    units="mm/d", description="Total 24 hour Precipitation 12:00-12:00 LT"
+)
+input_vars_['sfcWind']=input_vars_['sfcWind'].assign_attrs(
+    units="km/h", description="wind speed at 12:00 LT"
+)
+input_vars_['hurs'],input_vars_['sfcWind']
+
+input_vars_=input_vars_.chunk(dict(time=-1))
+input_vars_
+
+#now run xclim FWI code, explanation in link I sent under point 2
+
+import xclim
+# explanation of xclim code:
+# https://xclim.readthedocs.io/en/stable/_modules/xclim/indices/fire/_cffwis.html
+# sourcecode:
+# https://xclim.readthedocs.io/en/v0.40.0/xclim.indices.fire.html
+
+season_mask = xclim.indices.fire.fire_season(
+    tas=input_vars_.tas,
+    method="WF93",
+    freq="YS",
+    # Parameters below are at their default values, but listed here for explicitness.
+    temp_start_thresh="12 degC",
+    temp_end_thresh="5 degC",
+    temp_condition_days=3,
+)
+
+dc,dmc,ffmc,isi,bui,fwi = xclim.indices.cffwis_indices(
+    tas=input_vars_.tas,
+    pr=input_vars_.pr,
+    sfcWind=input_vars_.sfcWind,
+    hurs=input_vars_.hurs,
+    lat=input_vars_.lat,
+    season_mask=None,
+    overwintering=False,
+    dry_start=None,
+    prec_thresh="1.5 mm/d",
+    dmc_dry_factor=1.2,
+    # Parameters below are at their default values, but listed here for explicitness.
+    carry_over_fraction=0.75,
+    wetting_efficiency_fraction=0.75,
+    dc_start=15,
+    dmc_start=6,
+    ffmc_start=85,
+)
+
+fig = plt.figure(1, figsize=(10, 10))
+gs = gridspec.GridSpec(1,1)
+index=0
+ax = fig.add_subplot(gs[0], projection=ccrs.PlateCarree())
+ax.set_extent([65, 110, -20, 35], crs=ccrs.PlateCarree())
+ax.axis("off")
+import cartopy.io.shapereader as shpreader
+from cartopy.feature import ShapelyFeature
+ax.add_feature(cfeature.BORDERS,edgecolor='gray',facecolor='none',lw=1,zorder=5)
+ax.add_feature(cfeature.LAND, edgecolor='gray',facecolor='none',lw=1,zorder=5)
+
+ax.add_feature(cfeature.OCEAN, facecolor='white', edgecolor='none', zorder=6)
+
+
+cm= fwi.mean('time').plot.pcolormesh(add_colorbar=False, levels = [0,5,11,22,38,50], add_labels = False)
+
+#ax.set_title('Fire Weather Index (2015-08-01 to 2015-11-01)',fontsize=14)
+
+cax = fig.add_axes([0.2, 0.2, 0.6, 0.03])
+cb=fig.colorbar(cm, cax=cax, orientation='horizontal')
+cb.set_label(label="Fire Weather Index", fontsize=14)
+cb.set_ticks([2.5,8,17,30,44])
+cb.set_ticklabels(['Very Low','Low','Moderate','High','Very High'],rotation=45, fontsize=20)
+cb.ax.tick_params(labelsize='medium')
+plt.tight_layout() 
+plt.show()
+
+fig = plt.figure(1, figsize=(10, 10))
+gs = gridspec.GridSpec(1,1)
+index=0
+ax = fig.add_subplot(gs[0], projection=ccrs.PlateCarree())
+ax.set_extent([-10, 50, -50, 0], crs=ccrs.PlateCarree())
+ax.axis("off")
+import cartopy.io.shapereader as shpreader
+from cartopy.feature import ShapelyFeature
+ax.add_feature(cfeature.BORDERS,edgecolor='gray',facecolor='none',lw=1,zorder=5)
+ax.add_feature(cfeature.LAND, edgecolor='gray',facecolor='none',lw=1,zorder=5)
+
+ax.add_feature(cfeature.OCEAN, facecolor='white', edgecolor='none', zorder=6)
+
+cm= fwi.mean('time').plot.pcolormesh(levels=np.arange(0,45,5),add_colorbar=False, add_labels = False)
+
+#ax.set_title('Fire Weather Index (2015-08-01 to 2015-11-01)',fontsize=14)
+
+#cax = fig.add_axes([1,0.3,0.03,0.4])
+#cb=fig.colorbar(cm, cax=cax, orientation='vertical')
+#cb.set_label(label="Fire Weather Index", fontsize=14)
+#cb.ax.tick_params(labelsize='medium')
+# plt.tight_layout() 
+#plt.show()
+
+plt.tight_layout()
+cax = fig.add_axes([0.2, 0.2, 0.6, 0.05])
+cb=fig.colorbar(cm, cax=cax, orientation='horizontal')
+cb.set_label(label="Fire Weather Index", fontsize=14)
+cb.set_ticks([2.5,8,17,30,44])
+cb.set_ticklabels(['Very Low','Low','Moderate','High','Very High'],rotation=45)
+cb.ax.tick_params(labelsize='medium')
+plt.show()
+
