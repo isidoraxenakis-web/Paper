@@ -1,0 +1,132 @@
+from pyproj import Geod
+from shapely.geometry import LineString, Point, Polygon
+import numpy as np
+import xarray as xr
+from datetime import timedelta
+import datetime as dt
+import matplotlib.pyplot as plt
+from netCDF4 import Dataset
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import matplotlib.cm
+import pandas as pd
+from glob import glob
+import xesmf as xe
+import matplotlib as mpl
+from matplotlib import gridspec
+import cartopy.io.shapereader as shpreader
+from cartopy.feature import ShapelyFeature
+import glob
+
+
+#Open INFERNO monthly fire output
+output_dataset_Fires = xr.open_dataset("/nfs/a68/htmq9847/Inferno_data/Monthly_mean_burnt_area_fraction_for_HistSST_INFERNO_UKESM1_2000_2014_fract_area.nc")['monthly_mean_burnt_area_fraction'][:]
+
+Inferno_BAFm = xr.open_dataset("/nfs/a68/htmq9847/Inferno_data/Monthly_mean_burnt_area_fraction_for_HistSST_INFERNO_UKESM1_2000_2014_fract_area.nc")
+latm = Inferno_BAFm['latitude'][:]
+lonm = Inferno_BAFm['longitude'][:]
+timem = Inferno_BAFm['time'][:]
+
+#Reading Anual Inferno Output
+Annual_output_dataset_Fires = xr.open_dataset("/nfs/a68/htmq9847/Inferno_data/Annual_mean_burnt_area_fraction_for_HistSST_INFERNO_UKESM1_2000_2014_fract_area.nc")['annual_mean_burnt_area_fraction'][:]
+
+Inferno_BAF = xr.open_dataset("/nfs/a68/htmq9847/Inferno_data/Annual_mean_burnt_area_fraction_for_HistSST_INFERNO_UKESM1_2000_2014_fract_area.nc")
+lat = Inferno_BAF['latitude'][:]
+lon = Inferno_BAF['longitude'][:]
+time = Inferno_BAF['time'][:]
+
+#Sort GFED fIles
+GFED_BA_files = sorted(glob.glob('/nfs/a68/htmq9847/BAF/BA20*.nc'))
+ 
+#Open GFED files for 2000-2014 time period
+GFED_BA= xr.open_mfdataset(GFED_BA_files).sel(time=slice('2000-01-01T00:00:00.000000000','2014-12-31T00:00:00.000000000'))
+ 
+#Read total burnt area fraction in hectares
+ts_BA1 = GFED_BA['Total']
+
+#Resumple to a yearly sum
+ts_BA1_resample = (ts_BA1.resample(time = "YS").sum())
+
+#Mean across time
+BAF_mean = ts_BA1_resample.mean(dim = "time")
+
+#Convert to hectares
+BAF_Mean_ha = BAF_mean*100
+
+#Rename from lat and lon to latitude and longitude
+BAF_Mean_ha  = BAF_Mean_ha.rename({"lat": "latitude"})
+BAF_Mean_ha = BAF_Mean_ha.rename({"lon": "longitude"})
+
+BAF_meters = BAF_Mean_ha*10000
+
+#Make the longitude of the grid from 0-360 to -180 -180
+Grid_GFED = xr.open_dataset("/nfs/a68/htmq9847/Grid/GFED_grid_areas_hectares.nc")["grid_area"]
+
+Grid_GFED.coords['longitude'] = (Grid_GFED.coords['longitude'] + 180) % 360 - 180
+
+Grid_GFED = Grid_GFED.sortby(Grid_GFED.longitude)
+
+#Regrid to GFED grid
+output_grid_Fires = xr.Dataset({"latitude": (["latitude"], Grid_GFED .latitude.values),
+
+                       "longitude": (["longitude"], Grid_GFED .longitude.values)})
+    
+regridder_Fires = xe.Regridder(BAF_Mean_ha, Grid_GFED, "bilinear")
+
+output_grid_Fires = regridder_Fires(BAF_Mean_ha)
+
+#Calculte Burnt Area Fraction
+BAF_Fraction = (output_grid_Fires/Grid_GFED)*100
+print(BAF_Fraction.fillna(0).values.max())
+
+#Regrid the result to Inferno grid
+
+Inf_output_grid_Fires = xr.Dataset({"latitude": (["latitude"], output_dataset_Fires.latitude.values),
+
+                       "longitude": (["longitude"], output_dataset_Fires.longitude.values)})
+
+Inf_regridder_Fires = xe.Regridder(BAF_Fraction, Inf_output_grid_Fires, "bilinear")
+
+Inf_output_grid_Fires = Inf_regridder_Fires(BAF_Fraction)
+
+#Regridded plot
+# Initiate new Figure 
+fig= plt.figure(figsize=(10, 7))
+
+gs = gridspec.GridSpec(1, 1)
+
+index=0
+
+# Initiate new axes 
+ax = fig.add_subplot(gs[0], projection=ccrs.Robinson(central_longitude = 0))
+
+#Style of axes
+crs = ccrs.Robinson(central_longitude = 0)
+
+# Add coastlines
+ax.coastlines()
+
+#Add gridlines
+gl = ax.gridlines(draw_labels = True, linestyle='--')
+
+# Adjust font sizes
+gl.xlabel_style = {'size': 15}   # Longitude labels
+gl.ylabel_style = {'size': 15}   # Latitude labals
+gl.right_labels = False
+gl.top_labels = False
+
+#Add boarders and land
+ax.add_feature(cfeature.BORDERS, edgecolor='black', facecolor='None', alpha=0.5)
+ax.add_feature(cfeature.LAND,  edgecolor='black', facecolor='None', alpha=0.5)
+
+cmap = plt.cm.get_cmap("inferno_r").copy()
+cmap.set_under("white")
+
+#Plot square meters of fire for each grid cell
+im = Inf_output_grid_Fires.where(Inf_output_grid_Fires> 0).plot.pcolormesh(levels = [0.2, 0.5, 1, 2, 5, 10, 20, 50, 75, 100], cmap = cmap, add_colorbar=False, add_labels=False, transform=ccrs.PlateCarree())
+
+#Add colourbar
+ax_pos = ax.get_position()
+cax = fig.add_axes([ax_pos.x0, 0.1, ax_pos.width, 0.03])
+cbar = plt.colorbar(im, cax=cax, orientation='horizontal', extend = "neither")
+cbar.ax.tick_params(labelsize= 15) 
