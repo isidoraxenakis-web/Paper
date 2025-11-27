@@ -1,0 +1,72 @@
+# %%
+from pyproj import Geod
+from shapely.geometry import LineString, Point, Polygon
+import numpy as np
+import xarray as xr
+from datetime import timedelta
+import datetime as dt
+import matplotlib.pyplot as plt
+from netCDF4 import Dataset
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import matplotlib.cm
+import pandas as pd
+from glob import glob
+import xesmf as xe
+import matplotlib as mpl
+from matplotlib import gridspec
+import cartopy.io.shapereader as shpreader
+from cartopy.feature import ShapelyFeature
+import glob
+
+# %%
+Future_Fires = xr.open_dataset("/nfs/a68/lec1stt/Isidora_data/Annual_mean_burnt_area_fraction_for_SSP370_INFERNO_Interactive_UKESM1_2015_2099_fract_area.nc")["annual_mean_burnt_area_fraction"]
+
+# %%
+Mean_Future_Fires = (Future_Fires.sel(time=slice('2090-01-01','2099-01-01')).mean("time"))*100
+
+# %%
+#Application of GFED mask
+GFED_mask = xr.open_dataset("/nfs/a68/htmq9847/mask/GFED_basis_regions.nc")['GFED_basis_regions'][:]
+
+#Regrid GFED mask
+output_grid_Heatwave_GFED = xr.Dataset({"latitude": (["latitude"], Future_Fires.latitude.values),
+
+                       "longitude": (["longitude"], Future_Fires.longitude.values)})
+    
+regridder_Heatwave_GFED = xe.Regridder(GFED_mask, output_grid_Heatwave_GFED, "bilinear")
+
+output_grid_Heatwave_GFED = regridder_Heatwave_GFED(GFED_mask)
+
+# %%
+Fires_landonly_GFED = Mean_Future_Fires.where((output_grid_Heatwave_GFED >0) & (output_grid_Heatwave_GFED < 15))
+
+# %%
+#South Hemisphere of Africa
+Future_Fires_SHAF = Fires_landonly_GFED[40:72, 0:100]
+
+# %%
+#Southeast Asia
+Future_Fires_SEA = Fires_landonly_GFED[75:100, 35:60]
+
+# %%
+Future_Fires_SEA.max()
+
+# %%
+p = Future_Fires_SEA.plot(
+    transform=ccrs.PlateCarree(),
+    cmap = "inferno_r",
+    levels = [2,5,10,15,20,25],
+    extend = "neither",
+    add_labels = False,
+    subplot_kws={"projection": ccrs.Orthographic(100, 0)},
+    cbar_kwargs={
+        "orientation": "horizontal",   # Make colorbar horizontal
+        "pad": 0.05,                   # Space between plot and colorbar
+        "aspect": 50,}
+)
+ax = p.axes  
+p.colorbar.ax.tick_params(labelsize=14)
+# Add features
+ax.coastlines(resolution="110m", linewidth=1)
+ax.add_feature(cfeature.BORDERS, linewidth=0.7)
