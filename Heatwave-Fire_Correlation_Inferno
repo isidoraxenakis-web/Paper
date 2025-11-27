@@ -1,0 +1,416 @@
+from pyproj import Geod
+from shapely.geometry import LineString, Point, Polygon
+import numpy as np
+import xarray as xr
+from datetime import timedelta
+import datetime as dt
+import matplotlib.pyplot as plt
+from netCDF4 import Dataset
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import matplotlib.cm
+import pandas as pd
+from glob import glob
+import xesmf as xe
+import matplotlib as mpl
+from matplotlib import gridspec
+import cartopy.io.shapereader as shpreader
+from cartopy.feature import ShapelyFeature
+import glob
+
+#Calculation of Fires
+
+#Open netCDF files of daily maximum and minimum temperature
+Inferno_BAF = xr.open_dataset("/nfs/a68/htmq9847/Inferno_data/Monthly_mean_burnt_area_fraction_for_HistSST_INFERNO_UKESM1_2000_2014_fract_area.nc")
+
+#Read in variables of BAF, latitude, longitude and time
+BAF = Inferno_BAF['monthly_mean_burnt_area_fraction'][:]
+lat = Inferno_BAF['latitude'][:]
+lon = Inferno_BAF['longitude'][:]
+time = Inferno_BAF['time'][:]
+
+#Resample according to every year
+Yearly_Fires= BAF.resample(time = "YS").sum()
+
+
+#Calculating Heatwaves
+
+#Open netCDF files of maximum and minimum temperature in 2010
+Tmax_Data = xr.open_mfdataset("/nfs/a68/htmq9847/Tmax/*.nc")
+Tmin_Data = xr.open_mfdataset("/nfs/a68/htmq9847/Tmin/*.nc")
+
+#Read in variables of minimum and maximum temperature, latitude, longitude and time
+maxtemp = Tmax_Data['t2m'][:]
+mintemp = Tmin_Data['t2m'][:]
+lat = Tmax_Data['latitude'][:]
+lon = Tmax_Data['longitude'][:]
+time = Tmax_Data['valid_time'][:]
+
+#Convert temperature variables to celcious
+maxtemp = maxtemp - 273.15
+mintemp = mintemp - 273.15
+
+#Northern Hemisphere
+#Index with temperature variables according to summer season
+Nsummer_maxtemp = maxtemp.sel(valid_time = (Tmax_Data.valid_time.dt.season == 'JJA'))
+Nsummer_mintemp = mintemp.sel(valid_time = (Tmin_Data.valid_time.dt.season == 'JJA'))
+
+#Calculate maximum and minimum temperature across a 9-day moving window mean
+Nnineday_maxtemp = Nsummer_maxtemp.rolling(valid_time = 9, center = True).mean()     
+Nnineday_mintemp = Nsummer_mintemp.rolling(valid_time = 9, center = True).mean()     
+
+#Calculate the 90th percentile of the maximum and minimum 9-day moving window mean temperature
+NPercentile_Tmax = Nnineday_maxtemp.quantile(0.9, dim = 'valid_time')
+NPercentile_Tmin = Nnineday_mintemp.quantile(0.9, dim = 'valid_time')
+
+#Define the temperature function of heatwaves where the summer max and min temperatures are larger than their 90th percentiles.
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+Ntemp_function = Nsummer_maxtemp.where(((Nsummer_maxtemp > NPercentile_Tmax) & (Nsummer_mintemp > NPercentile_Tmin)), 0)
+
+Ntemp_function = Ntemp_function.where((Ntemp_function == 0.0), 1)
+#Define a minimum observation window summation of 3 days for temperature function 
+Nmin_observation_window = (Ntemp_function.rolling(valid_time = 3, center = True).sum())
+
+#Define heatwaves where the summ of observations is larger than 3
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+Nheatwave = Nmin_observation_window.where((Nmin_observation_window == 3), 0)
+
+#Select only the values that are 
+NHeatwave = Nheatwave.where((Nheatwave < 3), 1)
+
+
+#Southern Hemisphere
+#Index with temperature variables according to summer season
+Ssummer_maxtemp = maxtemp.sel(valid_time = (Tmax_Data.valid_time.dt.season == 'DJF'))
+Ssummer_mintemp = mintemp.sel(valid_time = (Tmin_Data.valid_time.dt.season == 'DJF'))
+
+#Calculate maximum and minimum temperature across a 9-day moving window mean
+Snineday_maxtemp = Ssummer_maxtemp.rolling(valid_time = 9, center = True).mean()     
+Snineday_mintemp = Ssummer_mintemp.rolling(valid_time = 9, center = True).mean()     
+
+#Calculate the 90th percentile of the maximum and minimum 9-day moving window mean temperature
+SPercentile_Tmax = Snineday_maxtemp.quantile(0.9, dim = 'valid_time')
+SPercentile_Tmin = Snineday_mintemp.quantile(0.9, dim = 'valid_time')
+
+#Define the temperature function of heatwaves where the summer max and min temperatures are larger than their 90th percentiles.
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+Stemp_function = Ssummer_maxtemp.where(((Ssummer_maxtemp > SPercentile_Tmax) & (Ssummer_mintemp > SPercentile_Tmin)), 0)
+
+Stemp_function = Stemp_function.where((Stemp_function == 0.0), 1)
+#Define a minimum observation window summation of 3 days for temperature function 
+Smin_observation_window = (Stemp_function.rolling(valid_time = 3, center = True).sum())
+
+#Define heatwaves where the summ of observations is larger than 3
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+Sheatwave = Smin_observation_window.where((Smin_observation_window == 3), 0)
+
+#Select only the values that are 
+SHeatwave = Sheatwave.where((Sheatwave < 3), 1)
+
+#Count the heatwave occurences across 2010 for every latutide and longitude
+Sheatwave_timeav = SHeatwave.sum(dim = 'valid_time')
+
+
+#Regriding
+#Open netCDF files of maximum and minimum temperature (Inferno)
+output_dataset_Tmax = xr.open_dataset("/nfs/a68/lec1stt/Isidora_data/Daily_max_temp_wind_and_RH_variables_for_HistSST_INFERNO_UKESM1_2000_2014.nc")['air_temperature'][:]
+
+#Creating output Grid
+Heatwave_output_grid = xr.Dataset({"latitude": (["latitude"], output_dataset_Tmax.latitude.values),
+
+                       "longitude": (["longitude"], output_dataset_Tmax.longitude.values)})
+
+#North Hemisphere
+North_regridder = xe.Regridder(Nheatwave, Heatwave_output_grid, "bilinear")
+
+North_output_grid = North_regridder(Nheatwave)
+
+#South Hemisphere
+South_regridder = xe.Regridder(SHeatwave, Heatwave_output_grid, "bilinear")
+
+South_output_grid = South_regridder(SHeatwave)
+
+#Resample
+South_output_grid = South_output_grid.resample(valid_time = "YS").sum()
+North_output_grid = North_output_grid.resample(valid_time = "YS").sum()
+
+#Rename
+North_output_grid = North_output_grid.rename({"valid_time": "time"})
+South_output_grid = South_output_grid.rename({"valid_time": "time"})
+
+#Convert time from object to datetime64[ns] type
+Yearly_Fires["time"] = Yearly_Fires["time"].astype("datetime64[ns]")
+
+New_InfNHeatwave_arr = North_output_grid.compute()
+New_InfSHeatwave_arr = South_output_grid.compute()
+
+Yearly_Fires = xr.DataArray(Yearly_Fires, dims=('time', 'latitude', 'longitude'))
+
+Yearly_Fires_diff = Yearly_Fires.diff(dim = "time")
+
+#Differencing to remove persisting values (autocorrelation)
+New_InfNHeatwave_arr_diff = New_InfNHeatwave_arr.diff(dim = "time")
+New_InfSHeatwave_arr_diff = New_InfSHeatwave_arr.diff(dim = "time")
+Yearly_Fires_diff = Yearly_Fires.diff(dim = "time")
+
+Yearly_Fires_diff = Yearly_Fires.diff(dim = "time")
+
+#Calculate correlation
+South_corr = xr.corr(New_InfNHeatwave_arr_diff, Yearly_Fires_diff, dim = "time")
+
+North_corr = xr.corr(New_InfSHeatwave_arr_diff, Yearly_Fires_diff, dim = "time")
+
+from scipy.stats import t 
+res = np.sqrt(15- 2)
+
+res1 = np.sqrt(1 - (North_corr**2))
+
+t_vals =  (res / res1) * (North_corr)
+
+t_vals = t_vals.fillna(0)
+p_vals = 2 * t.sf(np.abs(t_vals), df =13)
+
+print(p_vals.min())
+
+
+sres = np.sqrt(15- 2)
+
+sres1 = np.sqrt(1 - (South_corr**2))
+
+st_vals =  (sres / sres1) * (South_corr)
+
+st_vals = st_vals.fillna(0)
+sp_vals = 2 * t.sf(np.abs(st_vals), df =13)
+
+print(sp_vals.min())
+
+North_corr_sign= North_corr.where(p_vals < 0.05)
+South_corr_sign= South_corr.where(sp_vals < 0.05)
+
+
+#Northern Hemisphere
+latitude1 = lat[73:144]
+Nheatwave_corr = North_corr[73:144]
+Nheatwave_corr_sign = North_corr_sign[73:144]
+
+#Southern Hemisphere
+latitude2 = lat[0:72]
+Sheatwave_corr = South_corr[0:72]
+Sheatwave_corr_sign = South_corr_sign[0:72]
+
+# Initiate new Figure 
+fig= plt.figure(figsize=(10, 7))
+
+gs = gridspec.GridSpec(1, 1)
+
+index=0
+
+# Initiate new axes 
+ax = fig.add_subplot(gs[0], projection=ccrs.Robinson(central_longitude = 0))
+
+#Style of axes
+crs = ccrs.Robinson(central_longitude = 0)
+
+# Add coastlines
+ax.coastlines()
+
+#Add gridlines
+gl = ax.gridlines(draw_labels = True, linestyle='--')
+gl.right_labels = False
+gl.top_labels = False
+
+
+# Adjust font sizes
+gl.xlabel_style = {'size': 15}   # Longitude labels
+gl.ylabel_style = {'size': 15}   # Latitude labals
+
+cmap = matplotlib.cm.get_cmap("RdBu_r")
+#cmap.set_under(color = "white")
+
+#ax.axis("off")
+ax.add_feature(cfeature.BORDERS, edgecolor='black', facecolor='None', alpha=0.5)
+ax.add_feature(cfeature.LAND,  edgecolor='black', facecolor='None', alpha=0.5)
+
+Nim = Nheatwave_corr.plot.pcolormesh(levels = [-1, -0.75, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 0.75, 1], cmap = cmap, add_labels=False, add_colorbar=False, alpha = 0.5, transform=ccrs.PlateCarree())
+NimS = Nheatwave_corr_sign.plot.pcolormesh(levels = [-1, -0.75, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 0.75, 1], cmap = cmap, add_labels=False, add_colorbar=False, transform=ccrs.PlateCarree())
+
+Sim = Sheatwave_corr.plot.pcolormesh(levels = [-1, -0.75, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 0.75, 1], cmap = "RdBu_r", add_labels=False, add_colorbar=False, alpha = 0.5, transform=ccrs.PlateCarree())
+SimS = Sheatwave_corr_sign.plot.pcolormesh(levels = [-1, -0.75, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 0.75, 1], cmap = "RdBu_r", add_labels=False, add_colorbar=False, transform=ccrs.PlateCarree())
+
+ax_pos = ax.get_position()
+cax = fig.add_axes([ax_pos.x0, 0.1, ax_pos.width, 0.03])
+cbar = plt.colorbar(Nim, cax=cax, orientation='horizontal', extend = "neither")
+
+
+#Open netCDF files of daily maximum and minimum temperature
+Inferno_Tmax = xr.open_dataset("/nfs/a68/lec1stt/Isidora_data/Daily_max_temp_wind_and_RH_variables_for_HistSST_INFERNO_UKESM1_2000_2014.nc")
+Inferno_Tmin = xr.open_dataset("/nfs/a68/lec1stt/Isidora_data/Daily_min_temp_and_RH_variables_for_HistSST_INFERNO_UKESM1_2000_2014.nc")
+
+#Read in variables of minimum and maximum temperature, latitude, longitude and time
+Inf_maxtemp = Inferno_Tmax['air_temperature'][:]
+Inf_mintemp = Inferno_Tmin['air_temperature'][:]
+lat = Inferno_Tmax['latitude'][:]
+lon = Inferno_Tmax['longitude'][:]
+time = Inferno_Tmax['time'][:]
+
+#Convert temperature variables to celcious
+Inf_maxtemp = Inf_maxtemp - 273.15
+Inf_mintemp = Inf_mintemp - 273.15
+
+
+#Northern Hemispere
+#Index with temperature variables according to summer season
+NInf_summer_maxtemp = Inf_maxtemp.sel(time = (Inferno_Tmax.time.dt.season == 'JJA'))
+NInf_summer_mintemp = Inf_mintemp.sel(time = (Inferno_Tmin.time.dt.season == 'JJA'))
+
+#Calculate maximum and minimum temperature across a 9-day moving window mean
+NInf_nineday_maxtemp = NInf_summer_maxtemp.rolling(time = 9, center = True).mean()     
+NInf_nineday_mintemp = NInf_summer_mintemp.rolling(time = 9, center = True).mean()     
+
+#Calculate the 90th percentile of the maximum and minimum 9-day moving window mean temperature
+NInf_Percentile_Tmax = NInf_nineday_maxtemp.quantile(0.9, dim = 'time')
+NInf_Percentile_Tmin = NInf_nineday_mintemp.quantile(0.9, dim = 'time')
+
+#Define the temperature function of heatwaves where the summer max and min temperatures are larger than their 90th percentiles.
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+NInf_temp_function = NInf_summer_maxtemp.where(((NInf_summer_maxtemp > NInf_Percentile_Tmax) & (NInf_summer_mintemp > NInf_Percentile_Tmin)), 0)
+
+NInf_temp_function = NInf_temp_function.where((NInf_temp_function == 0.0), 1)
+#Define a minimum observation window summation of 3 days for temperature function 
+NInf_min_observation_window = (NInf_temp_function.rolling(time = 3, center = True).sum())
+
+#Define heatwaves where the summ of observations is larger than 3
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+NInf_heatwave = NInf_min_observation_window.where((NInf_min_observation_window == 3), 0)
+
+#Select only the values that are 
+NInf_Heatwave = NInf_heatwave.where((NInf_heatwave < 3), 1)
+
+
+#Southern Hemisphere
+#Index with temperature variables according to summer season
+SInf_summer_maxtemp = Inf_maxtemp.sel(time = (Inferno_Tmax.time.dt.season == 'DJF'))
+SInf_summer_mintemp = Inf_mintemp.sel(time = (Inferno_Tmin.time.dt.season == 'DJF'))
+
+#Calculate maximum and minimum temperature across a 9-day moving window mean
+SInf_nineday_maxtemp = SInf_summer_maxtemp.rolling(time = 9, center = True).mean()     
+SInf_nineday_mintemp = SInf_summer_mintemp.rolling(time = 9, center = True).mean()     
+
+#Calculate the 90th percentile of the maximum and minimum 9-day moving window mean temperature
+SInf_Percentile_Tmax = SInf_nineday_maxtemp.quantile(0.9, dim = 'time')
+SInf_Percentile_Tmin = SInf_nineday_mintemp.quantile(0.9, dim = 'time')
+
+#Define the temperature function of heatwaves where the summer max and min temperatures are larger than their 90th percentiles.
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+SInf_temp_function = SInf_summer_maxtemp.where(((SInf_summer_maxtemp > SInf_Percentile_Tmax) & (SInf_summer_mintemp > SInf_Percentile_Tmin)), 0)
+
+SInf_temp_function = SInf_temp_function.where((SInf_temp_function == 0.0), 1)
+#Define a minimum observation window summation of 3 days for temperature function 
+SInf_min_observation_window = (SInf_temp_function.rolling(time = 3, center = True).sum())
+
+#Define heatwaves where the summ of observations is larger than 3
+#Where this is true, repleace the value with 1, where it is not replace the value with 0
+SInf_heatwave = SInf_min_observation_window.where((SInf_min_observation_window == 3), 0)
+
+#Select only the values that are 
+SInf_Heatwave = SInf_heatwave.where((SInf_heatwave < 3), 1)
+
+#Resample
+Inf_North_output_grid = NInf_Heatwave.resample(time = "YS").sum()
+Inf_South_output_grid = SInf_Heatwave.resample(time = "YS").sum()
+
+Inf_North_output_grid = xr.DataArray(Inf_North_output_grid, dims=('time', 'latitude', 'longitude'))
+
+Inf_South_output_grid = xr.DataArray(Inf_South_output_grid, dims=('time', 'latitude', 'longitude'))
+
+Inf_South_output_grid["time"] = Inf_South_output_grid["time"].astype("datetime64[ns]")
+
+Inf_North_output_grid["time"] = Inf_North_output_grid["time"].astype("datetime64[ns]")
+
+Inf_North_output_grid_diff = Inf_North_output_grid.diff("time")
+Inf_South_output_grid_diff = Inf_South_output_grid.diff("time")
+
+#Calculate correlation
+Inf_South_corr = xr.corr(Inf_South_output_grid_diff, Yearly_Fires_diff, dim = "time")
+
+Inf_North_corr = xr.corr(Inf_North_output_grid_diff, Yearly_Fires_diff, dim = "time")
+
+from scipy.stats import t 
+res = np.sqrt(15- 2)
+
+Inf_res1 = np.sqrt(1 - (Inf_North_corr**2))
+
+Inf_t_vals =  (res / Inf_res1) * (Inf_North_corr)
+
+Inf_t_vals = Inf_t_vals.fillna(0)
+Inf_p_vals = 2 * t.sf(np.abs(Inf_t_vals), df =13)
+
+print(Inf_p_vals.min())
+
+
+sres = np.sqrt(15- 2)
+
+Inf_sres1 = np.sqrt(1 - (Inf_South_corr**2))
+
+Inf_st_vals =  (sres/Inf_sres1) * (Inf_South_corr)
+
+Inf_st_vals = Inf_st_vals.fillna(0)
+Inf_sp_vals = 2 * t.sf(np.abs(Inf_st_vals), df =13)
+
+print(Inf_sp_vals.min())
+
+Inf_North_corr_sign = Inf_North_corr.where(Inf_p_vals < 0.05)
+Inf_South_corr_sign = Inf_South_corr.where(Inf_sp_vals < 0.05)
+
+#Northern Hemisphere
+latitude1 = lat[73:144]
+Inf_Nheatwave_corr = Inf_North_corr[73:144]
+Inf_Nheatwave_corr_sign = Inf_North_corr_sign[73:144]
+
+#Southern Hemisphere
+latitude2 = lat[0:72]
+Inf_Sheatwave_corr = Inf_South_corr[0:72]
+Inf_Sheatwave_corr_sign = Inf_South_corr_sign[0:72]
+
+# Initiate new Figure 
+fig= plt.figure(figsize=(10, 7))
+
+gs = gridspec.GridSpec(1, 1)
+
+index=0
+
+# Initiate new axes 
+ax = fig.add_subplot(gs[0], projection=ccrs.PlateCarree())
+
+#Style of axes
+crs = ccrs.Robinson(central_longitude = 0)
+
+# Add coastlines
+ax.coastlines()
+
+#Add gridlines
+#gl = ax.gridlines(draw_labels = True, linestyle='--')
+#gl.left_labels = False
+#gl.bottom_labels = False
+
+
+# Adjust font sizes
+#gl.xlabel_style = {'size': 15}   # Longitude labels
+#gl.ylabel_style = {'size': 15}   # Latitude labals
+
+cmap = matplotlib.cm.get_cmap("RdBu_r")
+#cmap.set_under(color = "white")
+
+#ax.axis("off")
+ax.add_feature(cfeature.BORDERS, edgecolor='black', facecolor='None', alpha=0.5)
+ax.add_feature(cfeature.LAND,  edgecolor='black', facecolor='None', alpha=0.5)
+
+INim = Inf_Nheatwave_corr.plot.pcolormesh(levels = [-1, -0.75, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 0.75, 1], cmap = cmap, add_labels=False, add_colorbar=False, alpha = 0.5)
+INimS = Inf_Nheatwave_corr_sign.plot.pcolormesh(levels = [-1, -0.75, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 0.75, 1], cmap = cmap, add_labels=False, add_colorbar=False)
+
+ISim = Inf_Sheatwave_corr.plot.pcolormesh(levels = [-1, -0.75, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 0.75, 1], cmap = "RdBu_r", add_labels=False, add_colorbar=False, alpha = 0.5)
+ISimS = Inf_Sheatwave_corr_sign.plot.pcolormesh(levels = [-1, -0.75, -0.5, -0.25, -0.1, 0.1, 0.25, 0.5, 0.75, 1], cmap = "RdBu_r", add_labels=False, add_colorbar=False)
+
+ax_pos = ax.get_position()
+cax = fig.add_axes([ax_pos.x0, 0.1, ax_pos.width, 0.03])
+cbar = plt.colorbar(INim, cax=cax, orientation='horizontal', extend = "neither")
