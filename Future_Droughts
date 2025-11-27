@@ -1,0 +1,101 @@
+# %%
+from pyproj import Geod
+from shapely.geometry import LineString, Point, Polygon
+import numpy as np
+import xarray as xr
+from datetime import timedelta
+import datetime as dt
+import matplotlib.pyplot as plt
+from netCDF4 import Dataset
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import matplotlib.cm
+import pandas as pd
+from glob import glob
+import xesmf as xe
+import matplotlib as mpl
+from matplotlib import gridspec
+import cartopy.io.shapereader as shpreader
+from cartopy.feature import ShapelyFeature
+import glob
+
+# %%
+Output_SM_mean = xr.open_dataset("/nfs/a68/lec1stt/Isidora_data/Daily_mean_Met_and_soil_moisture_variables_for_SSP126_INFERNO_Interactive_UKESM1_2090_2099.nc")["moisture_content_of_soil_layer"]
+
+# %%
+#Selecting all of the soil moisture values of the time frame
+Inf_sm = Output_SM_mean.sel(time = ((Output_SM_mean.time.dt.day >= 1) & (Output_SM_mean.time.dt.day <= 5400)))
+
+#Inf_sm = Inf_sm.mean(dim = 'bnds')
+
+#Calculating soil moisture across a 30-day moving window mean
+Inf_thirtyday_sm = Inf_sm.rolling(time = 30, center = True).mean()
+
+#Calculate the 80th percentile of the soil moisture 9-day moving window 
+Inf_Percentile_sm = Inf_thirtyday_sm.quantile(0.8, dim = 'time')
+
+#Calculate where the data soil moisture is less than the 80th Percentile
+Inf_sm_function = Inf_sm.where((Inf_sm < Inf_Percentile_sm))
+
+#Fill nan values with 0
+Inf_sm1 = Inf_sm_function.fillna(0)
+
+#Replace Soil moisture drought values with 1 
+Inf_sm2 = Inf_sm1.where((Inf_sm1 == 0.0), 1)
+
+#Calculate the difference between each successive drought soil moisture value
+Inf_diff = Inf_sm2.diff(dim='time', n = 1)
+
+#Where drought event starts the difference is 1 (transition from 0 to 1) 
+Inf_drought_starts = Inf_diff.where(Inf_diff == 1)
+Inf_drought_ends = Inf_diff.where(Inf_diff == -1) #Similarly when drought ends the difference is -1 (transition from 1 to 0)
+
+#count the amount of times a drought event start
+Inf_drought_starts_number = Inf_drought_starts.count(dim = 'time')
+
+
+# %%
+#Application of GFED mask
+GFED_mask = xr.open_dataset("/nfs/a68/htmq9847/mask/GFED_basis_regions.nc")['GFED_basis_regions'][:]
+
+#Regrid GFED mask
+output_grid_Heatwave_GFED = xr.Dataset({"latitude": (["latitude"], Output_SM_mean.latitude.values),
+
+                       "longitude": (["longitude"], Output_SM_mean.longitude.values)})
+    
+regridder_Heatwave_GFED = xe.Regridder(GFED_mask, output_grid_Heatwave_GFED, "bilinear")
+
+output_grid_Heatwave_GFED = regridder_Heatwave_GFED(GFED_mask)
+
+# %%
+Droughts_landonly_GFED = Inf_drought_starts_number.where((output_grid_Heatwave_GFED >0) & (output_grid_Heatwave_GFED < 15))
+
+
+# %%
+#South Hemisphere of Africa
+Future_Droughts_SHAF = Droughts_landonly_GFED[40:72, 0:100]
+#Southeast Asia
+Future_Droughts_SEA = Droughts_landonly_GFED[75:100, 35:60]
+
+# %%
+Future_Droughts_SEA.max()
+
+# %%
+p = Future_Droughts_SEA.plot(
+    transform=ccrs.PlateCarree(),
+    cmap = "inferno_r",
+    levels = [10,20,30,40,50,60,70,80,100],
+    extend = "max",
+    add_labels = False,
+    subplot_kws={"projection": ccrs.Orthographic(100, 0)},
+    cbar_kwargs={
+        "orientation": "horizontal",   # Make colorbar horizontal
+        "pad": 0.05,                   # Space between plot and colorbar
+        "aspect": 50,}
+)
+p.colorbar.ax.tick_params(labelsize=14)
+ax = p.axes  
+
+# Add features
+ax.coastlines(resolution="110m", linewidth=1)
+ax.add_feature(cfeature.BORDERS, linewidth=0.7)
